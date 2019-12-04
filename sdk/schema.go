@@ -38,8 +38,8 @@ type BusinessGroup struct {
 
 // RequestResourceView - resource view of a provisioned request
 type RequestResourceView struct {
-	Content []DeploymentResource `json:"content,omitempty"`
-	Links   []interface{}        `json:"links,omitempty"`
+	Content []interface{} `json:"content,omitempty"`
+	Links   []interface{} `json:"links,omitempty"`
 }
 
 // DeploymentResource - deployment level view of the provisionined request
@@ -55,7 +55,7 @@ type DeploymentResource struct {
 	RequestID       string                 `json:"requestId,omitempty"`
 	ResourceID      string                 `json:"resourceId,omitempty"`
 	ResourceType    string                 `json:"resourceType,omitempty"`
-	ResourcesData   DeploymentResourceData `json:"data,omitempty"`
+	ResourcesData   map[string]interface{} `json:"data,omitempty"`
 }
 
 // DeploymentResourceData - view of the resources/machines in a deployment

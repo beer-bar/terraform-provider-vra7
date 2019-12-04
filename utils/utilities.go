@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"reflect"
 	"strconv"
-	"strings"
 )
 
 // terraform provider constants
@@ -53,29 +52,6 @@ func ConvertInterfaceToString(interfaceData interface{}) string {
 	return stringData
 }
 
-// UpdateResourceConfigurationMap updates the resource configuration with
-//the deployment resource data if there is difference
-// between the config data and deployment data, return true
-func UpdateResourceConfigurationMap(
-	resourceConfiguration map[string]interface{}, vmData map[string]map[string]interface{}) (map[string]interface{}, bool) {
-	var changed bool
-	for configKey1, configValue1 := range resourceConfiguration {
-		for configKey2, configValue2 := range vmData {
-			if strings.HasPrefix(configKey1, configKey2+".") {
-				trimmedKey := strings.TrimPrefix(configKey1, configKey2+".")
-				currentValue := configValue1
-				updatedValue := ConvertInterfaceToString(configValue2[trimmedKey])
-
-				if updatedValue != "" && updatedValue != currentValue {
-					resourceConfiguration[configKey1] = updatedValue
-					changed = true
-				}
-			}
-		}
-	}
-	return resourceConfiguration, changed
-}
-
 // ReplaceValueInRequestTemplate replaces the value for a given key in a catalog
 // request template.
 func ReplaceValueInRequestTemplate(templateInterface map[string]interface{}, field string, value interface{}) (map[string]interface{}, bool) {
@@ -115,4 +91,18 @@ func AddValueToRequestTemplate(templateInterface map[string]interface{}, field s
 	}
 	//Return updated map interface type
 	return templateInterface
+}
+
+// ResourceMapper returns the mapping of resource attributes from ResourceView APIs
+// to Catalog Item Request Template APIs
+func ResourceMapper() map[string]string {
+	m := make(map[string]string)
+	m["MachineName"] = "name"
+	m["MachineDescription"] = "description"
+	m["MachineMemory"] = "memory"
+	m["MachineStorage"] = "storage"
+	m["MachineCPU"] = "cpu"
+	m["MachineStatus"] = "status"
+	m["MachineType"] = "type"
+	return m
 }

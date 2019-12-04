@@ -73,6 +73,8 @@ func (c *APIClient) GetCatalogItemRequestTemplate(catalogItemID string) (*Catalo
 	if unmarshallErr != nil {
 		return nil, unmarshallErr
 	}
+	// j, _ := json.Marshal(requestTemplate)
+	// log.Critical("the template is ====> %v ", string(j))
 	return &requestTemplate, nil
 }
 

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -37,9 +36,9 @@ type ProviderSchema struct {
 	BusinessGroupName       string
 	WaitTimeout             int
 	RequestStatus           string
-	FailedMessage           string
 	DeploymentConfiguration map[string]interface{}
-	ResourceConfiguration   map[string]interface{}
+	//ResourceConfiguration   map[string]interface{}
+	ResourceConfiguration []ResourceConfigurationStruct
 }
 
 func resourceVra7Deployment() *schema.Resource {
@@ -48,6 +47,9 @@ func resourceVra7Deployment() *schema.Resource {
 		Read:   resourceVra7DeploymentRead,
 		Update: resourceVra7DeploymentUpdate,
 		Delete: resourceVra7DeploymentDelete,
+		Importer: &schema.ResourceImporter{
+			State: schema.ImportStatePassthrough,
+		},
 
 		Schema: map[string]*schema.Schema{
 			"catalog_item_name": {
@@ -89,23 +91,12 @@ func resourceVra7Deployment() *schema.Resource {
 				Computed: true,
 				ForceNew: true,
 			},
-			"failed_message": {
-				Type:     schema.TypeString,
-				Computed: true,
-				ForceNew: true,
-				Optional: true,
-			},
 			"deployment_configuration": {
 				Type:     schema.TypeMap,
 				Optional: true,
 				Elem:     schema.TypeString,
 			},
-			"resource_configuration": {
-				Type:     schema.TypeMap,
-				Optional: true,
-				Computed: true,
-				Elem:     schema.TypeString,
-			},
+			"resource_configuration": resourceConfigurationSchema(),
 		},
 	}
 }
@@ -127,6 +118,7 @@ func (s byLength) Swap(i, j int) {
 // This function creates a new vRA 7 Deployment using configuration in a user's Terraform file.
 // The Deployment is produced by invoking a catalog item that is specified in the configuration.
 func resourceVra7DeploymentCreate(d *schema.ResourceData, meta interface{}) error {
+	log.Info("Creating the resource vra7_deployment...")
 	vraClient = meta.(*sdk.APIClient)
 	// Get client handle
 	p := readProviderConfiguration(d)
@@ -156,31 +148,20 @@ func resourceVra7DeploymentCreate(d *schema.ResourceData, meta interface{}) erro
 	}
 	log.Info("createResource->key_list %v\n", componentNameList)
 
-	// Arrange component names in descending order of text length.
-	// Component names are sorted this way because '.', which is used as a separator, may also occur within
-	// component names. In these situations, the longest name match that includes '.'s should win.
 	sort.Sort(byLength(componentNameList))
 
 	//Update request template field values with values from user configuration.
-	for configKey, configValue := range p.ResourceConfiguration {
+	for _, rConfig := range p.ResourceConfiguration {
 		for _, componentName := range componentNameList {
-			// User-supplied resource configuration keys are expected to be of the form:
-			//     <component name>.<property name>.
 			// Extract the property names and values for each component in the blueprint, and add/update
 			// them in the right location in the request template.
-			if strings.HasPrefix(configKey, componentName) {
-				propertyName := strings.TrimPrefix(configKey, componentName+".")
-				if len(propertyName) == 0 {
-					return fmt.Errorf(
-						"resource_configuration key is not in correct format. Expected %s to start with %s",
-						configKey, componentName+".")
+			if rConfig.Name == componentName {
+				for propertyName, propertyValue := range rConfig.Configuration {
+					requestTemplate.Data[componentName] = updateRequestTemplate(
+						requestTemplate.Data[componentName].(map[string]interface{}),
+						propertyName,
+						propertyValue)
 				}
-				// Function call which changes request template field values with user-supplied values
-				requestTemplate.Data[componentName] = updateRequestTemplate(
-					requestTemplate.Data[componentName].(map[string]interface{}),
-					propertyName,
-					configValue)
-				break
 			}
 		}
 	}
@@ -199,6 +180,7 @@ func resourceVra7DeploymentCreate(d *schema.ResourceData, meta interface{}) erro
 	if err != nil {
 		return err
 	}
+	log.Info("Finished creating the resource vra7_deployment with request id %s", d.Id())
 	return resourceVra7DeploymentRead(d, meta)
 }
 
@@ -214,8 +196,10 @@ func updateRequestTemplate(templateInterface map[string]interface{}, field strin
 
 // Terraform call - terraform apply
 // This function updates the state of a vRA 7 Deployment when changes to a Terraform file are applied.
-// The update is performed on the Deployment using supported (day-2) actions.
+//The update is performed on the Deployment using supported (day-2) actions.
 func resourceVra7DeploymentUpdate(d *schema.ResourceData, meta interface{}) error {
+
+	log.Info("Updating the resource vra7_deployment with request id %s", d.Id())
 	vraClient = meta.(*sdk.APIClient)
 	// Get the ID of the catalog request that was used to provision this Deployment.
 	catalogItemRequestID := d.Id()
@@ -274,26 +258,20 @@ func resourceVra7DeploymentUpdate(d *schema.ResourceData, meta interface{}) erro
 							return fmt.Errorf("Error retrieving reconfigure action template for the component %v: %v ", componentName, err.Error())
 						}
 						configChanged := false
-						for configKey := range p.ResourceConfiguration {
+
+						for _, rConfig := range p.ResourceConfiguration {
 							var returnFlag bool
 							//compare resource list (resource_name) with user configuration fields
-							if strings.HasPrefix(configKey, componentName+".") {
-								//If user_configuration contains resource_list element
-								// then split user configuration key into resource_name and field_name
-								nameList := strings.Split(configKey, componentName+".")
-								//actionResponseInterface := actionResponse.(map[string]interface{})
-								//Function call which changes the template field values with  user values
-								//Replace existing values with new values in resource child template
-								resourceActionTemplate.Data, returnFlag = utils.ReplaceValueInRequestTemplate(
-									resourceActionTemplate.Data,
-									nameList[1],
-									p.ResourceConfiguration[configKey])
-								if returnFlag {
-									configChanged = true
+							if rConfig.Name == componentName {
+								for propertyName, propertyValue := range rConfig.Configuration {
+									resourceActionTemplate.Data, returnFlag = utils.ReplaceValueInRequestTemplate(
+										resourceActionTemplate.Data, propertyName, propertyValue)
+									if returnFlag {
+										configChanged = true
+									}
 								}
 							}
 						}
-						oldData, _ := d.GetChange("resource_configuration")
 						// If template value got changed then set post call and update resource child
 						if configChanged {
 							// This request id is for the reconfigure action on this machine and
@@ -301,22 +279,12 @@ func resourceVra7DeploymentUpdate(d *schema.ResourceData, meta interface{}) erro
 							// It will not replace the initial catalog item request id
 							requestID, err := vraClient.PostResourceAction(resources.ID, reconfigureActionID, resourceActionTemplate)
 							if err != nil {
-								err = d.Set("resource_configuration", oldData)
-								if err != nil {
-									return err
-								}
 								log.Errorf("The update request failed with error: %v ", err)
 								return err
 							}
-							status, err := waitForRequestCompletion(d, meta, requestID)
+							_, err = waitForRequestCompletion(d, meta, requestID)
 							if err != nil {
-								// if the update request fails, go back to the old state and return the error
-								if status == sdk.Failed {
-									setErr := d.Set("resource_configuration", oldData)
-									if setErr != nil {
-										return setErr
-									}
-								}
+								log.Errorf("The update request failed with error: %v ", err)
 								return err
 							}
 						}
@@ -325,6 +293,7 @@ func resourceVra7DeploymentUpdate(d *schema.ResourceData, meta interface{}) erro
 			}
 		}
 	}
+	log.Info("Finished updating the resource vra7_deployment with request id %s", d.Id())
 	return resourceVra7DeploymentRead(d, meta)
 }
 
@@ -332,6 +301,7 @@ func resourceVra7DeploymentUpdate(d *schema.ResourceData, meta interface{}) erro
 // This function retrieves the latest state of a vRA 7 deployment. Terraform updates its state based on
 // the information returned by this function.
 func resourceVra7DeploymentRead(d *schema.ResourceData, meta interface{}) error {
+	log.Info("Reading the resource vra7_deployment with request id %s ", d.Id())
 	vraClient = meta.(*sdk.APIClient)
 	// Get the ID of the catalog request that was used to provision this Deployment. This id
 	// will remain the same for this deployment across any actions on the machines like reconfigure, etc.
@@ -347,52 +317,30 @@ func resourceVra7DeploymentRead(d *schema.ResourceData, meta interface{}) error 
 		return fmt.Errorf("Resource view failed to load:  %v", errTemplate)
 	}
 
-	resourceDataMap := make(map[string]map[string]interface{})
+	var resourceConfigList []ResourceConfigurationStruct
 	for _, resource := range requestResourceView.Content {
-		if resource.ResourceType == sdk.InfrastructureVirtual {
-			resourceData := resource.ResourcesData
-			log.Info("The resource data map of the resource %v is: \n%v", resourceData.Component, resource.ResourcesData)
-			dataVals := make(map[string]interface{})
-			resourceDataMap[resourceData.Component] = dataVals
-			dataVals[sdk.MachineCPU] = resourceData.CPU
-			dataVals[sdk.MachineStorage] = resourceData.Storage
-			dataVals[sdk.IPAddress] = resourceData.IPAddress
-			dataVals[sdk.MachineMemory] = resourceData.Memory
-			dataVals[sdk.MachineName] = resourceData.MachineName
-			dataVals[sdk.MachineGuestOs] = resourceData.MachineGuestOperatingSystem
-			dataVals[sdk.MachineBpName] = resourceData.MachineBlueprintName
-			dataVals[sdk.MachineType] = resourceData.MachineType
-			dataVals[sdk.MachineReservationName] = resourceData.MachineReservationName
-			dataVals[sdk.MachineInterfaceType] = resourceData.MachineInterfaceType
-			dataVals[sdk.MachineID] = resourceData.MachineID
-			dataVals[sdk.MachineGroupName] = resourceData.MachineGroupName
-			dataVals[sdk.MachineDestructionDate] = resourceData.MachineDestructionDate
-			// Handle Network Info
-			for idx, netDetails := range resourceData.Networks {
-				log.Info("The Network list value is for idx %i  = %+v", idx, netDetails)
-				networkIndexName := "Network" + strconv.Itoa(idx)
-				dataVals[networkIndexName+".IPAddress"] = netDetails.NetworkAddressInfo.IPAddress
-				dataVals[networkIndexName+".MACAddress"] = netDetails.NetworkAddressInfo.MACAddress
-				dataVals[networkIndexName+".Name"] = netDetails.NetworkAddressInfo.Name
+		rMap := resource.(map[string]interface{})
+		for key, value := range rMap {
+			if rMap["resourceType"] == "Infrastructure.Virtual" {
+				if key == "data" {
+					var resourceConfigStruct ResourceConfigurationStruct
+					resourceConfigStruct.Configuration = value.(map[string]interface{})
+					resourceConfigList = append(resourceConfigList, resourceConfigStruct)
+				}
 			}
-
 		}
 	}
-	resourceConfiguration, _ := d.Get("resource_configuration").(map[string]interface{})
-	resourceConfiguration, changed := utils.UpdateResourceConfigurationMap(resourceConfiguration, resourceDataMap)
-
-	if changed {
-		setError := d.Set("resource_configuration", resourceConfiguration)
-		if setError != nil {
-			return fmt.Errorf(setError.Error())
-		}
+	if err := d.Set("resource_configuration", flattenResourceConfigurations(resourceConfigList)); err != nil {
+		return fmt.Errorf("error setting resource configuration - error: %v", err)
 	}
+	log.Info("Finished reading the resource vra7_deployment with request id %s", d.Id())
 	return nil
 }
 
 //Function use - To delete resources which are created by terraform and present in state file
 //Terraform call - terraform destroy
 func resourceVra7DeploymentDelete(d *schema.ResourceData, meta interface{}) error {
+	log.Info("Deleting the resource vra7_deployment with request id %s", d.Id())
 	vraClient = meta.(*sdk.APIClient)
 	//Get requester machine ID from schema.dataresource
 	catalogItemRequestID := d.Id()
@@ -452,6 +400,7 @@ func resourceVra7DeploymentDelete(d *schema.ResourceData, meta interface{}) erro
 			}
 		}
 	}
+	log.Info("Finished deleting the resource vra7_deployment....")
 	return nil
 }
 
@@ -473,20 +422,13 @@ func (p *ProviderSchema) checkResourceConfigValidity(requestTemplate *sdk.Catalo
 	// if the key in config is machine1.vsphere.custom.location, match every string after each dot
 	// until a matching string is found in componentSet.
 	// If found, it's a valid key else the component name is invalid
-	for k := range p.ResourceConfiguration {
-		var key = k
-		var isValid bool
-		for strings.LastIndex(key, ".") != -1 {
-			lastIndex := strings.LastIndex(key, ".")
-			key = key[0:lastIndex]
-			if _, ok := componentSet[key]; ok {
-				log.Info("The component name %s in the terraform config file is valid ", key)
-				isValid = true
-				break
-			}
-		}
-		if !isValid {
-			invalidKeys = append(invalidKeys, k)
+	for _, k := range p.ResourceConfiguration {
+		var key = k.Name
+		if _, ok := componentSet[key]; ok {
+			log.Info("The component name %s in the terraform config file is valid ", key)
+			continue
+		} else {
+			invalidKeys = append(invalidKeys, key)
 		}
 	}
 	// there are invalid resource config keys in the terraform config file, abort and throw an error
@@ -617,8 +559,7 @@ func readProviderConfiguration(d *schema.ResourceData) *ProviderSchema {
 		BusinessGroupName:       strings.TrimSpace(d.Get("businessgroup_name").(string)),
 		BusinessGroupID:         strings.TrimSpace(d.Get("businessgroup_id").(string)),
 		WaitTimeout:             d.Get("wait_timeout").(int) * 60,
-		FailedMessage:           strings.TrimSpace(d.Get("failed_message").(string)),
-		ResourceConfiguration:   d.Get("resource_configuration").(map[string]interface{}),
+		ResourceConfiguration:   expandResourceConfiguration(d.Get("resource_configuration").(*schema.Set).List()),
 		DeploymentConfiguration: d.Get("deployment_configuration").(map[string]interface{}),
 	}
 
